@@ -1,196 +1,216 @@
-###
-python sync_classes.py \
-  --excel_path "classes.xlsx" \
-  --sheet_name 0 \
-  --column 0 \
-  --dir_a "path/to/A" \
-  --dir_b "path/to/B" \
-  --threshold 5
-###
-
-
-
 import argparse
 import shutil
 from pathlib import Path
-from typing import Iterable, List, Set, Union
-
+from typing import List, Set, Union, Dict, Any
 import pandas as pd
-
+import logging
+import sys
+from datetime import datetime
 
 IMAGE_EXTS: Set[str] = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tif", ".tiff", ".webp"}
 
+def setup_logger(log_path: Path, verbose: bool = True) -> logging.Logger:
+    logger = logging.getLogger("sync_classes")
+    logger.setLevel(logging.DEBUG)
+    # 既存ハンドラ重複を避ける
+    if logger.handlers:
+        for h in logger.handlers[:]:
+            logger.removeHandler(h)
 
-def read_class_names(
-    excel_path: Union[str, Path],
-    sheet_name: Union[int, str] = 0,
-    column: Union[int, str] = 0,
-) -> List[str]:
-    """
-    Excel の指定列からクラス名（フォルダ名）を読み込む。
-    先頭行から順に非空セルのみを抽出し、重複は除去するが順序は維持する。
-    """
+    fmt = logging.Formatter("[%(asctime)s] %(levelname)s: %(message)s", "%Y-%m-%d %H:%M:%S")
+    fh = logging.FileHandler(log_path, encoding="utf-8")
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(fmt)
+    logger.addHandler(fh)
+    if verbose:
+        ch = logging.StreamHandler(sys.stdout)
+        ch.setLevel(logging.INFO)
+        ch.setFormatter(fmt)
+        logger.addHandler(ch)
+    return logger
+
+def read_class_names(excel_path: Union[str, Path], sheet_name: Union[int, str] = 0,
+                     column: Union[int, str] = 0, logger: logging.Logger = None) -> List[str]:
     df = pd.read_excel(excel_path, sheet_name=sheet_name, engine="openpyxl")
-    # 列の取り出し（インデックス or ラベル両対応）
-    if isinstance(column, int):
-        series = df.iloc[:, column]
-    else:
-        series = df[column]
-
+    series = df.iloc[:, column] if isinstance(column, int) else df[column]
     seen = set()
     classes: List[str] = []
     for v in series.dropna().astype(str).str.strip():
         if v and v not in seen:
             classes.append(v)
             seen.add(v)
+    if logger:
+        logger.info(f"Excel から {len(classes)} 件のクラス名を読み込みました")
     return classes
-
 
 def is_image_file(p: Path) -> bool:
     return p.is_file() and p.suffix.lower() in IMAGE_EXTS
-
 
 def count_images_in_dir(dir_path: Path) -> int:
     if not dir_path.exists() or not dir_path.is_dir():
         return 0
     return sum(1 for p in dir_path.rglob("*") if is_image_file(p))
 
-
-def copy_dir(src: Path, dst: Path, overwrite: bool, dry_run: bool = False) -> None:
-    """
-    ディレクトリをコピー。overwrite=True の場合は dst を先に削除してから丸ごとコピー。
-    """
+def copy_dir(src: Path, dst: Path, overwrite: bool,
+             logger: logging.Logger, dry_run: bool = False) -> None:
     if not src.exists():
-        raise FileNotFoundError(f"コピー元が見つかりません: {src}")
-
+        logger.error(f"コピー元が見つかりません: {src}")
+        return
     if overwrite and dst.exists():
-        print(f"  - 既存を削除: {dst}")
+        logger.info(f"  - 既存を削除: {dst}")
         if not dry_run:
             shutil.rmtree(dst)
-
     if dst.exists():
-        # overwrite=False で既に存在する場合は、コピーしない（何もしない）
-        print(f"  - 既に存在のためスキップ: {dst}")
+        logger.info(f"  - 既に存在のためスキップ: {dst}")
         return
-
-    print(f"  - コピー: {src} -> {dst}")
+    logger.info(f"  - コピー: {src} -> {dst}")
     if not dry_run:
         shutil.copytree(src, dst)
 
-
-def ensure_dir_exists(p: Path) -> None:
+def ensure_dir_exists(p: Path, logger: logging.Logger) -> None:
     if not p.exists():
+        logger.error(f"ディレクトリが見つかりません: {p}")
         raise FileNotFoundError(f"ディレクトリが見つかりません: {p}")
     if not p.is_dir():
+        logger.error(f"ディレクトリではありません: {p}")
         raise NotADirectoryError(f"ディレクトリではありません: {p}")
 
+def process(excel_path: Path, dir_a: Path, dir_b: Path,
+            sheet_name: Union[int, str] = 0, column: Union[int, str] = 0,
+            threshold: int = 5, dry_run: bool = False,
+            results_csv: Union[Path, None] = None,
+            results_xlsx: Union[Path, None] = None,
+            logger: logging.Logger = None) -> None:
 
-def process(
-    excel_path: Path,
-    dir_a: Path,
-    dir_b: Path,
-    sheet_name: Union[int, str] = 0,
-    column: Union[int, str] = 0,
-    threshold: int = 5,
-    dry_run: bool = False,
-) -> None:
-    print("=== 設定 ===")
-    print(f"Excel        : {excel_path}")
-    print(f"Sheet        : {sheet_name}")
-    print(f"Column       : {column}")
-    print(f"A フォルダ   : {dir_a}")
-    print(f"B フォルダ   : {dir_b}")
-    print(f"閾値(枚数)   : {threshold}")
-    print(f"Dry-run      : {dry_run}")
-    print("==============")
+    logger.info("=== 設定 ===")
+    logger.info(f"Excel        : {excel_path}")
+    logger.info(f"Sheet        : {sheet_name}")
+    logger.info(f"Column       : {column}")
+    logger.info(f"A フォルダ   : {dir_a}")
+    logger.info(f"B フォルダ   : {dir_b}")
+    logger.info(f"閾値(枚数)   : {threshold}")
+    logger.info(f"Dry-run      : {dry_run}")
+    logger.info("==============")
 
-    ensure_dir_exists(dir_a)
-    ensure_dir_exists(dir_b)
+    ensure_dir_exists(dir_a, logger)
+    ensure_dir_exists(dir_b, logger)
 
-    classes = read_class_names(excel_path, sheet_name=sheet_name, column=column)
+    classes = read_class_names(excel_path, sheet_name=sheet_name, column=column, logger=logger)
     if not classes:
-        print("Excel からクラス名が読み込めませんでした。（先頭列/指定列が空かも）")
+        logger.warning("Excel からクラス名が読み込めませんでした。（先頭列/指定列が空かも）")
         return
 
-    print(f"クラス数: {len(classes)}")
-    missing_in_b: List[str] = []
-    newly_copied: List[str] = []
-    overwritten: List[str] = []
-    warn_missing_after: List[str] = []
+    # 結果を貯める（後で DataFrame 化）
+    rows: List[Dict[str, Any]] = []
 
-    # 1) A に存在しないクラスを B からコピー
-    print("\n=== ステップ1: A に存在しないクラスを補完 ===")
+    # ステップ1: A に無いものを B から補完
+    logger.info("\n=== ステップ1: A に存在しないクラスを補完 ===")
     for cls in classes:
         a_cls = dir_a / cls
         b_cls = dir_b / cls
-        if not a_cls.exists():
-            print(f"[追加] {cls}")
-            if b_cls.exists():
-                copy_dir(b_cls, a_cls, overwrite=False, dry_run=dry_run)
-                newly_copied.append(cls)
+        exists_in_a_before = a_cls.exists()
+        exists_in_b = b_cls.exists()
+        images_before = count_images_in_dir(a_cls) if exists_in_a_before else 0
+
+        action = "skipped_ok"
+        note = ""
+
+        if not exists_in_a_before:
+            if exists_in_b:
+                logger.info(f"[追加] {cls}")
+                copy_dir(b_cls, a_cls, overwrite=False, dry_run=dry_run, logger=logger)
+                action = "copied_new_from_b"
             else:
-                print(f"  ! B にも存在しません: {b_cls}")
-                missing_in_b.append(cls)
+                logger.warning(f"  ! B にも存在しません: {b_cls}")
+                action = "missing_in_b"
+                note = "AにもBにも存在せず未作成"
+
+        images_after = images_before
+        if action == "copied_new_from_b" and not dry_run:
+            images_after = count_images_in_dir(a_cls)
+
+        rows.append({
+            "class": cls,
+            "exists_in_a_before": exists_in_a_before,
+            "exists_in_b": exists_in_b,
+            "images_in_a_before": images_before,
+            "action_step1": action,
+            "images_in_a_after_step1": images_after,
+            "note_step1": note,
+        })
+
+    # ステップ2: 枚数が閾値以下なら B から上書き
+    logger.info("\n=== ステップ2: 画像枚数チェック & 必要なら上書き ===")
+    for cls in classes:
+        a_cls = dir_a / cls
+        b_cls = dir_b / cls
+
+        exists_in_a = a_cls.exists()
+        exists_in_b = b_cls.exists()
+        images_before = count_images_in_dir(a_cls) if exists_in_a else 0
+
+        action = "none"
+        note = ""
+        images_after = images_before
+
+        if not exists_in_a:
+            logger.warning(f"[欠落] {cls} は A に未作成")
+            action = "missing_in_a"
+            note = "Step1でも作成されず"
         else:
-            print(f"[OK ] {cls} は A に存在")
-
-    # 2) A 直下の全クラスの画像数を確認し、閾値以下なら B から上書き
-    print("\n=== ステップ2: 画像枚数チェック & 必要なら上書き ===")
-    for cls in classes:
-        a_cls = dir_a / cls
-        b_cls = dir_b / cls
-        if not a_cls.exists():
-            print(f"[欠落] {cls} は A に未作成（ステップ1で B 側も無かった可能性）")
-            warn_missing_after.append(cls)
-            continue
-
-        count_a = count_images_in_dir(a_cls)
-        print(f"[枚数] {cls}: {count_a} 枚")
-        if count_a <= threshold:
-            if b_cls.exists():
-                print(f"  -> {cls}: 枚数が {threshold} 枚以下のため B から上書きコピー")
-                copy_dir(b_cls, a_cls, overwrite=True, dry_run=dry_run)
-                overwritten.append(cls)
+            logger.info(f"[枚数] {cls}: {images_before} 枚")
+            if images_before <= threshold:
+                if exists_in_b:
+                    logger.info(f"  -> {cls}: {threshold} 枚以下のため B から上書きコピー")
+                    copy_dir(b_cls, a_cls, overwrite=True, dry_run=dry_run, logger=logger)
+                    action = "overwritten_from_b"
+                    if not dry_run:
+                        images_after = count_images_in_dir(a_cls)
+                else:
+                    logger.warning(f"  ! B に {cls} が無く、上書きできません")
+                    action = "cannot_overwrite_missing_in_b"
             else:
-                print(f"  ! B に {cls} が無く、上書きできません")
-                missing_in_b.append(cls)
+                action = "kept_as_is"
 
-    # 3) 結果サマリ
-    print("\n=== 結果 ===")
-    if newly_copied:
-        print(f"新規コピー（A に無かったもの）: {len(newly_copied)} 件")
-        for c in newly_copied:
-            print(f"  - {c}")
-    else:
-        print("新規コピー: なし")
+        rows.append({
+            "class": cls,
+            "exists_in_a_before": exists_in_a,
+            "exists_in_b": exists_in_b,
+            "images_in_a_before": images_before,
+            "action_step2": action,
+            "images_in_a_after_step2": images_after,
+            "note_step2": note,
+        })
 
-    if overwritten:
-        print(f"上書きコピー（閾値以下）      : {len(overwritten)} 件")
-        for c in overwritten:
-            print(f"  - {c}")
-    else:
-        print("上書きコピー: なし")
+    # DataFrame へ
+    df = pd.DataFrame(rows)
 
-    if missing_in_b:
-        print(f"B 側に存在しなかったクラス     : {len(missing_in_b)} 件")
-        for c in sorted(set(missing_in_b)):
-            print(f"  - {c}")
-    else:
-        print("B 側欠落: なし")
+    # 既定ファイル名（未指定時）
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if results_csv is None:
+        results_csv = Path(f"sync_results_{ts}.csv")
+    if results_xlsx is None:
+        results_xlsx = Path(f"sync_results_{ts}.xlsx")
 
-    if warn_missing_after:
-        print(f"最終的に A に存在しないクラス  : {len(warn_missing_after)} 件")
-        for c in warn_missing_after:
-            print(f"  - {c}")
-    else:
-        print("A 側は Excel 記載のクラスを満たしています（上記 B 欠落除く）。")
+    # 保存
+    try:
+        df.to_csv(results_csv, index=False, encoding="utf-8-sig")
+        logger.info(f"結果CSVを書き出しました: {results_csv.resolve()}")
+    except Exception as e:
+        logger.error(f"CSV書き出し失敗: {e}")
 
-    print("\n処理完了。")
+    try:
+        with pd.ExcelWriter(results_xlsx, engine="openpyxl") as w:
+            df.to_excel(w, index=False, sheet_name="results")
+        logger.info(f"結果Excelを書き出しました: {results_xlsx.resolve()}")
+    except Exception as e:
+        logger.error(f"Excel書き出し失敗: {e}")
 
+    logger.info("\n処理完了。")
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Excel のクラス名リストに基づいて A フォルダを B から補完/上書きするツール"
+        description="Excel のクラス名リストに基づいて A フォルダを B から補完/上書きし、結果をログと表で保存"
     )
     parser.add_argument("--excel_path", type=Path, required=True, help="Excel ファイルパス（.xlsx）")
     parser.add_argument("--sheet_name", default=0, help="シート名またはインデックス（既定: 0）")
@@ -199,10 +219,13 @@ def main():
     parser.add_argument("--dir_b", type=Path, required=True, help="B フォルダのパス")
     parser.add_argument("--threshold", type=int, default=5, help="この枚数以下なら B で上書き（既定: 5）")
     parser.add_argument("--dry-run", action="store_true", help="実際にはコピーせず動作だけ確認")
+    parser.add_argument("--log_path", type=Path, default=Path("sync_classes.log"),
+                        help="ログファイルパス（既定: sync_classes.log）")
+    parser.add_argument("--results_csv", type=Path, default=None, help="結果CSVの出力先")
+    parser.add_argument("--results_xlsx", type=Path, default=None, help="結果Excelの出力先")
 
     args = parser.parse_args()
 
-    # sheet_name/column を int に解釈できるなら int にしておく
     def try_int(x):
         try:
             return int(x)
@@ -211,6 +234,7 @@ def main():
 
     sheet = try_int(args.sheet_name)
     col = try_int(args.column)
+    logger = setup_logger(args.log_path, verbose=True)
 
     process(
         excel_path=args.excel_path,
@@ -220,8 +244,10 @@ def main():
         column=col,
         threshold=args.threshold,
         dry_run=args.dry_run,
+        results_csv=args.results_csv,
+        results_xlsx=args.results_xlsx,
+        logger=logger,
     )
-
 
 if __name__ == "__main__":
     main()
