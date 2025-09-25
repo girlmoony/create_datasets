@@ -298,3 +298,14 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+python infer_to_excel_efficientnet.py \
+  --root "annotation_images" \
+  --out "inference_results.xlsx" \
+  --labels "classes_286.txt" \
+  --num_classes 286 \
+  --batch_size 128 \
+  --input_size 256 256 \
+  --model "best_acc_mode.pth.za" \
+  --th_score 0.95 \
+  --th_margin 0.25
