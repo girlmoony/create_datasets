@@ -309,3 +309,64 @@ python infer_to_excel_efficientnet.py \
   --model "best_acc_mode.pth.za" \
   --th_score 0.95 \
   --th_margin 0.25
+
+import cv2
+import numpy as np
+import torch
+from pathlib import Path
+from typing import List
+
+def predict_probs(model,
+                  img_paths: List[Path],
+                  batch_size: int,
+                  device: torch.device,
+                  input_size=(256, 256),
+                  divide_by_255: bool = True):
+    """
+    BGRのまま読み込み、cv2.resizeのみで前処理。
+    - input_size: (H, W) 既定 256x256
+    - divide_by_255: 学習時が[0,1]スケールなら True（既定）。[0,255]のまま学習していれば False に。
+    """
+    probs_all = []
+    batch_imgs = []
+    H, W = input_size
+
+    with torch.no_grad():
+        for p in img_paths:
+            # BGRで読み込む
+            img = cv2.imread(str(p), cv2.IMREAD_COLOR)  # shape: [H0, W0, 3], BGR, uint8
+            if img is None:
+                # 壊れ画像などはスキップ（空配列を返さないように注意）
+                # 必要なら logging してください
+                continue
+
+            # リサイズ（双一次）
+            img = cv2.resize(img, (W, H), interpolation=cv2.INTER_LINEAR)  # [H, W, 3], BGR
+
+            # テンソル化（BGR順のまま、[C,H,W]へ）
+            x = torch.from_numpy(img)  # uint8, [H,W,3], BGR
+            x = x.permute(2, 0, 1).contiguous()  # [3,H,W], BGR
+
+            if divide_by_255:
+                x = x.float().div_(255.0)  # [0,1]にスケーリング
+            else:
+                x = x.float()  # [0,255] のまま
+
+            batch_imgs.append(x)
+
+            if len(batch_imgs) == batch_size:
+                X = torch.stack(batch_imgs, dim=0).to(device)  # [B,3,H,W], BGRのまま
+                logits = model(X)                              # [B,C]
+                probs = torch.softmax(logits, dim=1).cpu().numpy()
+                probs_all.append(probs)
+                batch_imgs = []
+
+        # 端数バッチ
+        if batch_imgs:
+            X = torch.stack(batch_imgs, dim=0).to(device)
+            logits = model(X)
+            probs = torch.softmax(logits, dim=1).cpu().numpy()
+            probs_all.append(probs)
+
+    return np.vstack(probs_all) if probs_all else np.empty((0, 0), dtype=np.float32)
+
