@@ -280,6 +280,28 @@ def process(
     if out_copy_root:
         print(f"[INFO] コピー先: {out_copy_root}  dry_run={dry_run}")
 
+# match_and_dispatch.py の末尾などに追加
+if __name__ == "__main__":
+    import argparse
+    from pathlib import Path
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--miscls_root", required=True)
+    ap.add_argument("--excel", required=True)
+    ap.add_argument("--labels", required=True)
+    ap.add_argument("--out_excel", required=True)
+    ap.add_argument("--out_copy_root", default=None)
+    ap.add_argument("--dry_run", action="store_true")
+    args = ap.parse_args()
+
+    process(
+        miscls_root=Path(args.miscls_root),
+        excel_path=Path(args.excel),
+        label_txt=Path(args.labels),
+        out_excel=Path(args.out_excel),
+        out_copy_root=Path(args.out_copy_root) if args.out_copy_root else None,
+        dry_run=args.dry_run,
+    )
 
 
 
