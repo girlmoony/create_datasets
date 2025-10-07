@@ -368,3 +368,15 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# 100～200の中間くらい、まずは200枚を推奨
+python calib_selector.py \
+  --root /path/to/dataset \
+  --include-val \
+  --target 200 \
+  --per-class-min 1 \
+  --out-manifest calib_manifest.csv \
+  --out-dir /path/to/calib_images \
+  --keep-tree \
+  --symlink
+
