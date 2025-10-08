@@ -224,3 +224,145 @@ def main():
 
 if __name__ == "__main__":
     main()
+#!/usr/bin/env python3
+# save as dataset_mover.py
+# usage:
+#   python dataset_mover.py move-classes \
+#       --src /path/to/src_root \
+#       --splits-csv /path/to/train.csv /path/to/val.csv /path/to/test.csv \
+#       --dest /path/to/dest_root \
+#       --on-exist skip \
+#       --dry-run
+
+import argparse
+import csv
+import shutil
+from pathlib import Path
+from typing import List, Optional
+
+def ensure_dir(p: Path):
+    p.mkdir(parents=True, exist_ok=True)
+
+def unique_rename_path(dst: Path) -> Path:
+    if not dst.exists():
+        return dst
+    stem, suffix, parent = dst.stem, dst.suffix, dst.parent
+    i = 1
+    while True:
+        cand = parent / f"{stem}_{i}{suffix}"
+        if not cand.exists():
+            return cand
+        i += 1
+
+def move_dir(src: Path, dst: Path, on_exist: str = "skip", dry_run: bool = False) -> str:
+    if not src.exists():
+        return f"[SKIP] not found: {src}"
+    if dst.exists():
+        if on_exist == "skip":
+            return f"[SKIP] exists: {dst}"
+        elif on_exist == "overwrite":
+            if not dry_run:
+                shutil.rmtree(dst)
+        elif on_exist == "rename":
+            dst = unique_rename_path(dst)
+        else:
+            return f"[ERROR] invalid --on-exist: {on_exist}"
+    ensure_dir(dst.parent)
+    if dry_run:
+        return f"[DRYRUN] move {src} -> {dst}"
+    shutil.move(str(src), str(dst))
+    return f"[OK] move {src} -> {dst}"
+
+def read_list_from_csv(csv_file: Path, column: Optional[str] = None) -> List[str]:
+    items: List[str] = []
+    with open(csv_file, "r", encoding="utf-8-sig", newline="") as f:
+        sample = f.read(4096)
+        f.seek(0)
+        sniff = csv.Sniffer()
+        dialect = sniff.sniff(sample) if sample else csv.excel
+        has_header = sniff.has_header(sample) if sample else False
+        if has_header:
+            reader = csv.DictReader(f, dialect=dialect)
+            if column is None:
+                if reader.fieldnames:
+                    column = reader.fieldnames[0]
+            if column is None:
+                raise ValueError("CSVに列がありません")
+            for r in reader:
+                val = (r.get(column) or "").strip()
+                if val:
+                    items.append(val)
+        else:
+            reader = csv.reader(f, dialect=dialect)
+            for row in reader:
+                if row and row[0].strip():
+                    items.append(row[0].strip())
+    return items
+
+def assign_split_files(files: List[Path]):
+    mapping = {"train": None, "val": None, "test": None}
+    for p in files:
+        name = p.name.lower()
+        if "train" in name and mapping["train"] is None:
+            mapping["train"] = p
+        elif "val" in name and mapping["val"] is None:
+            mapping["val"] = p
+        elif "test" in name and mapping["test"] is None:
+            mapping["test"] = p
+    missing = [k for k, v in mapping.items() if v is None]
+    if missing:
+        raise SystemExit(f"train/val/test それぞれのCSVが必要です。不足: {missing}")
+    return mapping
+
+def cmd_move_classes_split_src(src_root: Path, splits_csv: List[Path], dest_root: Path,
+                               colname: Optional[str], on_exist: str, dry_run: bool):
+    """
+    src_root/
+      train/
+        classA/, classB/...
+      val/
+        classA/, classB/...
+      test/
+        classA/, classB/...
+    を前提に、各CSVに列挙されたクラスフォルダをそれぞれ
+    dest_root/train|val|test の直下へ移動する。
+    """
+    # CSV割当
+    split_map = assign_split_files(splits_csv)
+
+    # 出力先に train/val/test を用意
+    for s in ("train", "val", "test"):
+        ensure_dir(dest_root / s)
+
+    logs = []
+    for split in ("train", "val", "test"):
+        csv_file = split_map[split]
+        classes = read_list_from_csv(csv_file, column=colname)
+
+        src_split_dir = src_root / split
+        if not src_split_dir.is_dir():
+            logs.append(f"[ERROR] src split not found: {src_split_dir}")
+            continue
+
+        for cls in classes:
+            src_dir = src_split_dir / cls
+            dst_dir = dest_root / split / cls
+            logs.append(move_dir(src_dir, dst_dir, on_exist=on_exist, dry_run=dry_run))
+
+    print("\n".join(logs))
+
+def main():
+    ap = argparse.ArgumentParser(description="Move class folders from src_root/{train,val,test} to dest_root/{train,val,test}.")
+    ap.add_argument("--src", dest="src_root", type=Path, required=True, help="元データのルート（train/val/test を含む）")
+    ap.add_argument("--splits-csv", type=Path, nargs=3, required=True, help="train/val/test のクラス一覧CSV（ファイル名に train/val/test を含めてください）")
+    ap.add_argument("--dest", dest="dest_root", type=Path, required=True, help="出力ルート（train/val/test を作成）")
+    ap.add_argument("--col", dest="colname", type=str, default=None, help="CSVにヘッダがある場合の列名（無指定なら先頭列）")
+    ap.add_argument("--on-exist", choices=["skip", "overwrite", "rename"], default="skip", help="移動先に同名フォルダがある場合の挙動")
+    ap.add_argument("--dry-run", action="store_true", help="実際には移動せずログのみ")
+    args = ap.parse_args()
+
+    cmd_move_classes_split_src(args.src_root, args.splits_csv, args.dest_root,
+                               args.colname, args.on_exist, args.dry_run)
+
+if __name__ == "__main__":
+    main()
