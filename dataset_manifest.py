@@ -248,3 +248,25 @@ python eval.py \
   --manifest manifests/v2.csv \
   --checkpoint runs/v2_resnet18/best.pt \
   --split test
+
+
+
+既存コードの修正ポイント（チェックリスト）
+データセット生成
+旧：ImageFolder(root=...) など“ディレクトリ走査で自動ラベリング”
+新：MnifestDataset(manifest, data_root, split=...) に置き換え
+class_to_idx は train から作って val/test に渡す（上のtrain.py参照）
+データ分割（train/val/test）
+旧：random_split や “フォルダ分け”で分割
+新：マニフェスト側の split 列で固定（コード側では split= 指定のみ）
+クラス数の取り方
+旧：len(dataset.classes)
+新：len(class_to_idx)（train.py 参照）
+入力パス
+旧：--data_dir 1本
+新：--data_root（画像の物理ルート）＋ --manifest（合成済CSV）
+ログ/再現性
+合成に使った --base と --delta のセット、生成した manifest のパスを実験ログに記録
+seed 固定（train.py の set_seed）
+分散学習（必要なら）
+DistributedSampler(train_ds) を DataLoader に付与するだけでOK（上記は単GPU最小実装）
