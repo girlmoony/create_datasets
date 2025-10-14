@@ -33,12 +33,14 @@ class ManifestDataset(Dataset):
                  data_root: Path,
                  split: str = "train",
                  class_to_idx: Optional[Dict[str, int]] = None,
-                 transform=None,
+                 type: str = "train",          # ★ 追加: "train" / "val" / "test"
+                 image_size: int = 224,
                  strict_exists: bool = True):
         self.manifest_csv = Path(manifest_csv)
         self.data_root = Path(data_root)
         self.split = split.lower()
-        self.transform = transform
+        self.type = (type or self.split).lower()   # 明示未指定なら split に合わせる
+        self.image_size = image_size
 
         if class_to_idx is None:
             class_to_idx = build_class_to_idx(self.manifest_csv)
@@ -64,10 +66,23 @@ class ManifestDataset(Dataset):
         return len(self.items)
 
     def __getitem__(self, idx):
+        # ★ __getitem__ 内で手動定義（初回のみ生成→キャッシュ）
+        if self._tfms is None:
+            if self.type == "train":
+                self._tfms = T.Compose([
+                    T.Resize((self.image_size, self.image_size)),
+                    T.RandomHorizontalFlip(),
+                    T.ToTensor(),
+                ])
+            else:  # val / test など
+                self._tfms = T.Compose([
+                    T.Resize((self.image_size, self.image_size)),
+                    T.ToTensor(),
+                ])
+
         p, y = self.items[idx]
         img = Image.open(p).convert("RGB")
-        if self.transform:
-            img = self.transform(img)
+        img = self._tfms(img)
         return img, y
 
 
