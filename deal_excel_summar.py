@@ -33,23 +33,46 @@ print(pair_strings) # ['{2002, 2002}', '{2006, 2002}', '{2037, 2002}']
 
 
 
+import pandas as pd
 import re
 
-# --- ユーティリティ: 新ルールクラス名を正規化 ---
-# 1) _2002_ / _2002m_ のどちらでも _2002m_ に統一
+# === 1) Excel読み込み ===
+# 例: 列名は ['index','商品番号','クラス分類','新ルールクラス名'] を想定
+#     必要に応じて列名を合わせてください。
+df = pd.read_excel("input.xlsx")
+
+# 'index' 列が無ければ、行番号(1始まり)で作る
+if 'index' not in df.columns:
+    df['index'] = df.index + 1
+
+# === 2) 結合セルの埋め & まとめクラス抽出 ===
+df['クラス分類'] = df['クラス分類'].ffill()
+df['新ルールクラス名'] = df['新ルールクラス名'].ffill()
+
+is_matome = df['クラス分類'].eq('まとめクラス')
+df_loc = df.loc[is_matome].copy()
+
+# === 3) 基準商品番号(アンカー)を抽出:  _2002_ / _2002m_ 両対応 ===
+pat_anchor = re.compile(r'_(\d+)(?:m)?_')
+
+def extract_anchor(s: str):
+    m = pat_anchor.search(str(s))
+    return int(m.group(1)) if m else None
+
+df_loc['基準商品番号'] = df_loc['新ルールクラス名'].map(extract_anchor)
+
+# === 4) 文字列を必ず _<番号>m_ に正規化 ===
 def force_m(name: str) -> str:
     name = str(name)
     return re.sub(r'_(\d+)(?:m)?_', lambda m: f'_{m.group(1)}m_', name, count=1)
 
-# 2) 先頭のプレフィックス（最初のアンダースコアまで）を new_prefix に置換
-def replace_prefix(name: str, new_prefix: str) -> str:
-    name = str(name)
-    return re.sub(r'^[^_]+', new_prefix, name, count=1)
+# === 5) 先頭プレフィックス（XXXX）を抽出 ===
+def extract_prefix(name: str):
+    m = re.match(r'^([^_]+)', str(name))
+    return m.group(1) if m else ""
 
-# --- ここまでユーティリティ ---
-
-# df_loc は「まとめクラス」で '基準商品番号' が入っている DataFrame（前メッセージの続き）
-# 代表の新ルールクラス名（同じアンカーで同一のはず）を1つ拾い、_m_ を強制
+# === 6) アンカー(基準商品番号)ごとに代表のルール名・prefix・indexを拾う ===
+# 代表の「新ルールクラス名」（同アンカー内で最初の非空）を取り、_m_ を強制
 rep_rule_per_anchor = (
     df_loc.dropna(subset=['基準商品番号'])
          .groupby('基準商品番号')['新ルールクラス名']
@@ -57,27 +80,30 @@ rep_rule_per_anchor = (
          .map(force_m)
 )
 
-# 各アンカーに属する商品番号リスト
-prods_per_anchor = (
+# 代表の index（同アンカー内で最初の非NaN）
+rep_index_per_anchor = (
     df_loc.dropna(subset=['基準商品番号'])
-         .groupby('基準商品番号')['商品番号']
-         .apply(list)
+         .groupby('基準商品番号')['index']
+         .agg(lambda s: next((int(x) for x in s if pd.notna(x)), None))
 )
 
-# ------- LABEL_DATA 形式の出力 -------
-for anchor, prods in prods_per_anchor.items():
-    rule_m = rep_rule_per_anchor.get(anchor, "")
-    # 1行で: {アンカー,{LABEL_DATA{index,"ルール名_m_化"}}}, を列挙
-    line = ", ".join(f'{{{int(anchor)},{{LABEL_DATA{{index,"{rule_m}"}}}}}}}' for _p in sorted(set(map(int, prods))))
-    print(line)
-    print("......")  # 区切りが必要なら。不要なら消してください
+# 代表の prefix（ルール名の先頭 'XXXX' を抽出）
+rep_prefix_per_anchor = rep_rule_per_anchor.map(extract_prefix)
 
-# ------- E_Class 形式の出力 -------
-for anchor, prods in prods_per_anchor.items():
-    rule_m = rep_rule_per_anchor.get(anchor, "")
-    # 先頭プレフィックスを "AAAA" に置換した版（例の形に合わせる）
-    rule_m_AAAA = replace_prefix(rule_m, "AAAA")
-    # 1行で: {index,{E_Class{アンカー, "AAAA", "AAAA_アンカーm_XXXX"}}}, を列挙
-    line = ", ".join(f'{{index,{{E_Class{{{int(anchor)}, "AAAA", "{rule_m_AAAA}"}}}}}}}' for _p in sorted(set(map(int, prods))))
+# === 7) 出力 ===
+# 7-1) LABEL_DATA 形式:
+#      仕様: {アンカー,{LABEL_DATA{index,"XXXX_アンカーm_XXXX"}}},
+print("----- LABEL_DATA -----")
+for anchor, rule_m in rep_rule_per_anchor.items():
+    idx_val = rep_index_per_anchor.get(anchor, 'index')  # 見つからない時は 'index' を文字で
+    line = f'{{{anchor},{{LABEL_DATA{{{idx_val},"{rule_m}"}}}}}},'
     print(line)
-    print("......")
+
+# 7-2) E_Class 形式:
+#      仕様: {index,{E_Class{アンカー, "XXXX", "XXXX_アンカーm_XXXX"}}},
+print("----- E_Class -----")
+for anchor, rule_m in rep_rule_per_anchor.items():
+    idx_val = rep_index_per_anchor.get(anchor, 'index')
+    prefix = rep_prefix_per_anchor.get(anchor, "")
+    line = f'{{{idx_val},{{E_Class{{{anchor}, "{prefix}", "{rule_m}"}}}}}},'
+    print(line)
