@@ -44,18 +44,15 @@ def extract_store(p: Path, pat: re.Pattern) -> Optional[str]:
     m = pat.search(p.name)
     return m.group("store") if m else None
 
-def pick_files(files: List[SrcFile], need: int, per_store_cap: int, existing_store_counts: Counter) -> List[SrcFile]:
-    """
-    Greedy selection that balances stores with a per-store cap.
-    """
+def pick_files_balanced_then_fill(files: List[SrcFile], need: int,
+                                  per_store_cap: int, existing_store_counts: Counter) -> List[SrcFile]:
     chosen: List[SrcFile] = []
     by_store: Dict[Optional[str], List[SrcFile]] = defaultdict(list)
     for f in files:
         by_store[f.store].append(f)
-    # deterministic order within each store for reproducibility
     for s in by_store:
         by_store[s].sort(key=lambda x: x.path.name)
-    # stores with smaller existing count first
+
     store_order = sorted(by_store.keys(), key=lambda s: (existing_store_counts.get(s, 0), str(s)))
     indices = {s: 0 for s in by_store}
     while len(chosen) < need and store_order:
@@ -75,17 +72,33 @@ def pick_files(files: List[SrcFile], need: int, per_store_cap: int, existing_sto
                 break
         if not progressed:
             break
-    return chosen
+
+    if len(chosen) >= need:
+        return chosen[:need]
+
+    chosen_set = {c.path for c in chosen}
+    filler: List[SrcFile] = []
+    for s in sorted(by_store.keys(), key=lambda x: str(x)):
+        for f in by_store[s]:
+            if f.path in chosen_set:
+                continue
+            filler.append(f)
+            if len(chosen) + len(filler) >= need:
+                break
+        if len(chosen) + len(filler) >= need:
+            break
+
+    return (chosen + filler)[:need]
 
 def main():
-    ap = argparse.ArgumentParser(description="Copy N PNGs per row to --dest/<subset>/<label> without overwriting; prefer 2 per store.")
+    ap = argparse.ArgumentParser(description="Copy N PNGs per row to --dest/<subset>/<label> without overwriting; prefer up to 6 per store, then fill.")
     ap.add_argument("--excel", required=True, help="Excel workbook path (will be updated)")
     ap.add_argument("--sheet", required=True, help="Sheet name to read/write")
     ap.add_argument("--dest", required=True, help="Destination base directory (contains train/val/test)")
     ap.add_argument("--dry-run", action="store_true", help="Plan only; write logs but do not copy files")
     ap.add_argument("--filename_regex", default=r'(?P<store>\d{3,4})', help="Regex that extracts 'store' from PNG filename")
     ap.add_argument("--recursive", action="store_true", default=True, help="Search recursively for PNGs in source folders")
-    ap.add_argument("--per_store_cap", type=int, default=2, help="Max files per store per destination (default 2)")
+    ap.add_argument("--primary_store_cap", type=int, default=6, help="Phase1 per-store cap (default 6)")
     args = ap.parse_args()
 
     excel_path = Path(args.excel)
@@ -138,11 +151,9 @@ def main():
 
     store_pat = re.compile(args.filename_regex)
 
-    # Track state PER DESTINATION to avoid duplicates and enforce per-store cap across rows
-    # dest_key := (subset, label_sanitized)
-    dest_existing_names: Dict[Tuple[str,str], Set[str]] = defaultdict(set)   # already present filenames at destination
-    dest_reserved_names: Dict[Tuple[str,str], Set[str]] = defaultdict(set)   # names reserved by earlier rows in this run
-    dest_store_counts: Dict[Tuple[str,str], Counter] = defaultdict(Counter)  # per-store counts already allocated
+    dest_existing_names: Dict[Tuple[str,str], Set[str]] = defaultdict(set)
+    dest_reserved_names: Dict[Tuple[str,str], Set[str]] = defaultdict(set)
+    dest_store_counts: Dict[Tuple[str,str], Counter] = defaultdict(Counter)
 
     for idx, row in df_ok.iterrows():
         subset = str(row[subset_col]).strip().lower()
@@ -168,29 +179,25 @@ def main():
         dst_dir.mkdir(parents=True, exist_ok=True)
         dest_key = (subset, label_name)
 
-        # Load current filenames from disk once for this destination
         if not dest_existing_names[dest_key]:
             dest_existing_names[dest_key] = {p.name for p in dst_dir.glob("*.png")}
 
-        # Build candidate list: PNGs whose filename does NOT yet exist (nor reserved) at destination
         pngs = list_pngs(src_folder, recursive=args.recursive)
         candidates: List[SrcFile] = []
         for p in pngs:
             name = p.name
             if name in dest_existing_names[dest_key] or name in dest_reserved_names[dest_key]:
-                continue  # skip: would collide by name
+                continue
             store = extract_store(p, store_pat)
             candidates.append(SrcFile(p, store))
 
-        # Pick files with per-store cap, considering previously allocated counts
-        selected = pick_files(candidates, need, args.per_store_cap, dest_store_counts[dest_key])
+        selected = pick_files_balanced_then_fill(candidates, need, args.primary_store_cap, dest_store_counts[dest_key])
 
         copied = 0
         sample_logs: List[str] = []
 
         for sf in selected:
-            target = dst_dir / sf.path.name  # keep original filename
-            # Reserve the filename immediately to prevent other rows from selecting same name
+            target = dst_dir / sf.path.name
             dest_reserved_names[dest_key].add(sf.path.name)
             if args.dry_run:
                 status = "DRY-RUN"
@@ -198,20 +205,17 @@ def main():
                 try:
                     shutil.copy2(sf.path, target)
                     status = "COPIED"
-                    # Mark as now existing on disk
                     dest_existing_names[dest_key].add(sf.path.name)
                 except Exception as e:
                     status = f"ERROR({e})"
             if status.startswith("COPIED") or status == "DRY-RUN":
                 copied += 1
                 sample_logs.append(f"{sf.path.name}(store={sf.store})[{status}]")
-            else:
-                sample_logs.append(f"{sf.path.name}[{status}]")
 
         unmet = max(0, need - copied)
         log_msg = f"{src_folder} -> {dst_dir} need={need} copied={copied} unmet={unmet}"
         if sample_logs:
-            log_msg += " | " + " ; ".join(sample_logs[:5])
+            log_msg += " | " + " ; ".join(sample_logs[:6])
         ws.cell(row=header_row + 1 + idx, column=log_col_idx, value=log_msg)
 
     wb.save(excel_path)
@@ -220,10 +224,11 @@ def main():
 if __name__ == "__main__":
     main()
 
-
 python copy_select_by_excel.py \
   --excel /path/to/book.xlsx \
   --sheet Sheet1 \
   --dest /srv/datasets \
+  --primary_store_cap 6 \
+  --filename_regex '(?P<store>\d{4})' \
   --dry-run
 
